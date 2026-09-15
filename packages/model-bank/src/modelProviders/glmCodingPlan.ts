@@ -1,4 +1,4 @@
-import type { ModelProviderCard } from '@/types/llm';
+import type { ModelProviderCard } from '../types';
 
 // ref: https://docs.z.ai/devpack/overview
 const GLMCodingPlan: ModelProviderCard = {
@@ -14,7 +14,7 @@ const GLMCodingPlan: ModelProviderCard = {
   settings: {
     disableBrowserRequest: true,
     proxyUrl: {
-      placeholder: 'https://api.z.ai/api/paas/v4',
+      placeholder: 'https://open.bigmodel.cn/api/coding/paas/v4',
     },
     responseAnimation: {
       speed: 2,

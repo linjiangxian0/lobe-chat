@@ -1,5 +1,10 @@
 import { isDesktop } from '@lobechat/const';
 
+import { DEFAULT_LANG } from '@/const/locale';
+import { type Locales, normalizeLocale } from '@/locales/resources';
+import { getSystemLanguage } from '@/utils/client/systemLanguage';
+import { isOnServerSide } from '@/utils/env';
+
 import { type UserStore } from '../../../store';
 import { currentSettings } from './settings';
 
@@ -18,21 +23,35 @@ const contextMenuMode = (s: UserStore) => {
   return isDesktop ? 'default' : 'disabled';
 };
 const responseLanguage = (s: UserStore) => generalConfig(s).responseLanguage;
+const currentResponseLanguage = (s: UserStore): Locales => {
+  const locale = responseLanguage(s);
+
+  if (locale) return normalizeLocale(locale);
+  if (isOnServerSide) return DEFAULT_LANG;
+
+  return normalizeLocale(getSystemLanguage());
+};
 const telemetry = (s: UserStore) => generalConfig(s).telemetry;
 const enableAutoScrollOnStreaming = (s: UserStore) =>
   generalConfig(s).enableAutoScrollOnStreaming ?? true;
+const enableMessageLinkIcon = (s: UserStore) => generalConfig(s).enableMessageLinkIcon ?? true;
+const workflowStreamingExpandLevel = (s: UserStore) =>
+  generalConfig(s).expandWorkflowWhileStreaming ? 'semi' : 'collapsed';
 
 export const userGeneralSettingsSelectors = {
   animationMode,
   config: generalConfig,
   contextMenuMode,
   enableAutoScrollOnStreaming,
+  enableMessageLinkIcon,
   fontSize,
   highlighterTheme,
   mermaidTheme,
   neutralColor,
   primaryColor,
+  currentResponseLanguage,
   responseLanguage,
   telemetry,
   transitionMode,
+  workflowStreamingExpandLevel,
 };

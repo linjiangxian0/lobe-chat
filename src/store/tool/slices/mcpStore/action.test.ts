@@ -1,5 +1,5 @@
 import type * as LobechatConstModule from '@lobechat/const';
-import { type LobeChatPluginManifest } from '@lobehub/chat-plugin-sdk';
+import { type ToolManifest } from '@lobechat/types';
 import { type PluginItem } from '@lobehub/market-sdk';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -44,17 +44,15 @@ vi.mock('@/libs/trpc/client', () => ({
   },
 }));
 
-// Keep zustand mock as it's needed globally
-vi.mock('zustand/traditional');
-
 // Mock sleep to speed up tests
 vi.mock('@/utils/sleep', () => ({
   sleep: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('zustand/traditional');
+
 const bootstrapToolStoreWithDesktop = async (isDesktopEnv: boolean) => {
   vi.resetModules();
-  vi.mock('zustand/traditional');
 
   vi.doMock('@lobechat/const', async () => {
     const actual = await vi.importActual<typeof LobechatConstModule>('@lobechat/const');
@@ -71,7 +69,6 @@ const bootstrapToolStoreWithDesktop = async (isDesktopEnv: boolean) => {
   const cleanup = () => {
     vi.resetModules();
     vi.doUnmock('@lobechat/const');
-    vi.mock('zustand/traditional');
   };
 
   return {
@@ -230,7 +227,7 @@ describe('mcpStore actions', () => {
   });
 
   describe('testMcpConnection', () => {
-    const mockManifest: LobeChatPluginManifest = {
+    const mockManifest: ToolManifest = {
       api: [],
       gateway: '',
       identifier: 'test-plugin',
@@ -717,7 +714,7 @@ describe('mcpStore actions', () => {
       },
     };
 
-    const mockServerManifest: LobeChatPluginManifest = {
+    const mockServerManifest: ToolManifest = {
       api: [],
       gateway: '',
       identifier: 'test-plugin',
@@ -1170,7 +1167,7 @@ describe('mcpStore actions', () => {
           version: '1.5.0',
         };
 
-        const serverManifestWithVersion: LobeChatPluginManifest = {
+        const serverManifestWithVersion: ToolManifest = {
           api: [],
           gateway: '',
           identifier: 'test-plugin',

@@ -5,7 +5,6 @@ import { Flexbox } from '@lobehub/ui';
 import { memo, Suspense } from 'react';
 
 import AbortResponse from './AbortResponse';
-import Intervention from './Intervention';
 import LoadingPlaceholder from './LoadingPlaceholder';
 import RejectedResponse from './RejectedResponse';
 import ToolRender from './Render';
@@ -51,20 +50,19 @@ const Render = memo<RenderProps>(
     isToolCalling,
     showCustomToolRender,
   }) => {
+    // Pending interventions are rendered in the bottom InterventionBar, not inline
     if (toolMessageId && intervention?.status === 'pending' && !disableEditing) {
-      return (
-        <Intervention
-          apiName={apiName}
-          id={toolMessageId}
-          identifier={identifier}
-          requestArgs={requestArgs || ''}
-          toolCallId={toolCallId}
-        />
-      );
+      return null;
     }
 
     if (intervention?.status === 'rejected') {
-      return <RejectedResponse reason={intervention.rejectedReason} />;
+      return (
+        <RejectedResponse
+          apiName={apiName}
+          reason={intervention.rejectedReason}
+          skipped={intervention.skipped}
+        />
+      );
     }
 
     if (intervention?.status === 'aborted') {

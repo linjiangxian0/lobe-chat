@@ -1,6 +1,12 @@
 import type { ExtendedHumanInterventionConfig } from '@/types/index';
 
 export interface LobeChatPluginApi {
+  /**
+   * Default execution timeout in milliseconds for this API.
+   * Falls back to the global default (120_000 ms) when omitted.
+   * The resolver reads this when the LLM does not supply `arguments.timeout`.
+   */
+  defaultTimeoutMs?: number;
   description: string;
   /**
    * Human intervention configuration
@@ -160,7 +166,13 @@ export interface UniformTool {
 
 // ---- Tool Lifecycle Types ----
 
-export type ToolSource = 'builtin' | 'plugin' | 'mcp' | 'klavis' | 'lobehubSkill';
+export type ToolSource = 'builtin' | 'client' | 'mcp' | 'composio' | 'lobehubSkill';
+
+/**
+ * Where the tool is executed for a given invocation.
+ * Orthogonal to ToolSource (origin): executor describes dispatch target.
+ */
+export type ToolExecutor = 'client' | 'server';
 
 /**
  * How a tool was activated at step level
@@ -171,7 +183,10 @@ export type ActivationSource = 'active_tools' | 'mention' | 'device' | 'discover
  * Operation-level tool set: determined at createOperation time, immutable during execution.
  */
 export interface OperationToolSet {
+  /** Tool IDs that may be restored from historical explicit activations for this run. */
+  activatableToolIds?: string[];
   enabledToolIds: string[];
+  executorMap?: Record<string, ToolExecutor>;
   manifestMap: Record<string, LobeToolManifest>;
   sourceMap: Record<string, ToolSource>;
   tools: UniformTool[];
@@ -205,7 +220,9 @@ export interface StepToolDelta {
  */
 export interface ResolvedToolSet {
   enabledToolIds: string[];
+  executorMap?: Record<string, ToolExecutor>;
   manifestMap: Record<string, LobeToolManifest>;
+  promptManifestMap: Record<string, LobeToolManifest>;
   sourceMap: Record<string, ToolSource>;
   tools: UniformTool[];
 }

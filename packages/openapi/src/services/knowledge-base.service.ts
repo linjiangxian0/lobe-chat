@@ -4,9 +4,11 @@ import { KnowledgeBaseModel } from '@/database/models/knowledgeBase';
 import type { KnowledgeBaseItem } from '@/database/schemas';
 import { knowledgeBases } from '@/database/schemas';
 import type { LobeChatDatabase } from '@/database/type';
+import { FileService as CoreFileService } from '@/server/services/file';
 
 import { BaseService } from '../common/base.service';
 import { processPaginationConditions } from '../helpers/pagination';
+import { projectPublicKnowledgeBase } from '../helpers/public-fields';
 import type {
   CreateKnowledgeBaseRequest,
   CreateKnowledgeBaseResponse,
@@ -26,9 +28,9 @@ import type {
 export class KnowledgeBaseService extends BaseService {
   private knowledgeBaseModel: KnowledgeBaseModel;
 
-  constructor(db: LobeChatDatabase, userId: string) {
-    super(db, userId);
-    this.knowledgeBaseModel = new KnowledgeBaseModel(db, userId);
+  constructor(db: LobeChatDatabase, userId: string, workspaceId?: string) {
+    super(db, userId, workspaceId);
+    this.knowledgeBaseModel = new KnowledgeBaseModel(db, userId, workspaceId);
   }
 
   /**
@@ -49,7 +51,7 @@ export class KnowledgeBaseService extends BaseService {
       const { limit, offset } = processPaginationConditions(request);
       const { keyword } = request;
 
-      const conditions = [eq(knowledgeBases.userId, this.userId)];
+      const conditions = [this.buildWorkspaceWhere(knowledgeBases)];
 
       if (keyword) {
         conditions.push(
@@ -79,7 +81,7 @@ export class KnowledgeBaseService extends BaseService {
         const accessType: KnowledgeBaseAccessType = 'owner';
 
         return {
-          ...item,
+          ...projectPublicKnowledgeBase(item),
           accessType,
         } as KnowledgeBaseListItem;
       });
@@ -122,7 +124,7 @@ export class KnowledgeBaseService extends BaseService {
       this.log('info', 'Knowledge base detail retrieved successfully', { id });
 
       return {
-        knowledgeBase,
+        knowledgeBase: projectPublicKnowledgeBase(knowledgeBase),
       };
     } catch (error) {
       this.handleServiceError(error, '获取知识库详情');
@@ -163,7 +165,7 @@ export class KnowledgeBaseService extends BaseService {
       });
 
       return {
-        knowledgeBase,
+        knowledgeBase: projectPublicKnowledgeBase(knowledgeBase),
       };
     } catch (error) {
       this.handleServiceError(error, '创建知识库');
@@ -189,11 +191,22 @@ export class KnowledgeBaseService extends BaseService {
 
       // Check if knowledge base exists and belongs to the current user
       const existingKb = await this.db.query.knowledgeBases.findFirst({
-        where: and(eq(knowledgeBases.id, id), eq(knowledgeBases.userId, this.userId)),
+        where: and(eq(knowledgeBases.id, id), this.buildWorkspaceWhere(knowledgeBases)),
       });
 
       if (!existingKb) {
         throw this.createNotFoundError('Knowledge base not found or access denied');
+      }
+
+      // `KNOWLEDGE_BASE_UPDATE:all` is a curation scope (restricted-KB
+      // visibility / permission management) that admins also hold, so it must
+      // not bypass the row gate. Mirror the lambda routers' creator/owner
+      // check — `KNOWLEDGE_BASE_DELETE:all` is owner-only in the role matrix.
+      if (
+        existingKb.userId !== this.userId &&
+        !(await this.hasGlobalPermission('KNOWLEDGE_BASE_DELETE'))
+      ) {
+        throw this.createAuthorizationError('仅创建者或工作区所有者可修改此知识库');
       }
 
       // Update knowledge base
@@ -201,13 +214,13 @@ export class KnowledgeBaseService extends BaseService {
 
       // Get updated knowledge base info
       const updatedKb = await this.db.query.knowledgeBases.findFirst({
-        where: eq(knowledgeBases.id, id),
+        where: and(eq(knowledgeBases.id, id), this.buildWorkspaceWhere(knowledgeBases)),
       });
 
       this.log('info', 'Knowledge base updated successfully', { id });
 
       return {
-        knowledgeBase: updatedKb as KnowledgeBaseItem,
+        knowledgeBase: projectPublicKnowledgeBase(updatedKb as KnowledgeBaseItem),
       };
     } catch (error) {
       this.handleServiceError(error, '更新知识库');
@@ -230,15 +243,25 @@ export class KnowledgeBaseService extends BaseService {
 
       // Check if knowledge base exists and belongs to the current user
       const existingKb = await this.db.query.knowledgeBases.findFirst({
-        where: and(eq(knowledgeBases.id, id), eq(knowledgeBases.userId, this.userId)),
+        where: and(eq(knowledgeBases.id, id), this.buildWorkspaceWhere(knowledgeBases)),
       });
 
       if (!existingKb) {
         throw this.createNotFoundError('Knowledge base not found or access denied');
       }
 
-      // Delete knowledge base
-      await this.knowledgeBaseModel.delete(id);
+      const result = await this.knowledgeBaseModel.deleteWithFiles(id);
+
+      if (result.deletedFiles.length > 0) {
+        const fileService = new CoreFileService(this.db, this.userId, this.workspaceId);
+        const urls = result.deletedFiles
+          .map((f: { url: string | null }) => f.url)
+          .filter(Boolean) as string[];
+
+        if (urls.length > 0) {
+          await fileService.deleteFiles(urls);
+        }
+      }
 
       this.log('info', 'Knowledge base deleted successfully', { id });
 

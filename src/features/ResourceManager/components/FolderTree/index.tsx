@@ -1,10 +1,11 @@
 'use client';
 
 import { CaretDownFilled } from '@ant-design/icons';
-import { ActionIcon, Flexbox, Icon } from '@lobehub/ui';
+import { Flexbox, Icon } from '@lobehub/ui';
+import { ActionIcon } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cx } from 'antd-style';
 import { FolderIcon, FolderOpenIcon } from 'lucide-react';
-import * as motion from 'motion/react-m';
+import * as m from 'motion/react-m';
 import { memo, useCallback } from 'react';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -89,7 +90,7 @@ export const FolderTreeItemComponent = memo<FolderTreeItemProps>(
           style={{ paddingInlineStart: level * 16 + 8 }}
           onClick={handleClick}
         >
-          <motion.div
+          <m.div
             animate={{ rotate: isExpanded ? 0 : -90 }}
             transition={{ duration: 0.2, ease: 'easeInOut' }}
           >
@@ -101,7 +102,7 @@ export const FolderTreeItemComponent = memo<FolderTreeItemProps>(
                 handleToggle();
               }}
             />
-          </motion.div>
+          </m.div>
           <Flexbox
             horizontal
             align={'center'}
@@ -126,7 +127,7 @@ export const FolderTreeItemComponent = memo<FolderTreeItemProps>(
         </Flexbox>
 
         {isExpanded && item.children && item.children.length > 0 && (
-          <motion.div
+          <m.div
             animate={{ height: 'auto', opacity: 1 }}
             initial={{ height: 0, opacity: 0 }}
             style={{ overflow: 'hidden' }}
@@ -147,7 +148,7 @@ export const FolderTreeItemComponent = memo<FolderTreeItemProps>(
                 />
               ))}
             </Flexbox>
-          </motion.div>
+          </m.div>
         )}
       </Flexbox>
     );

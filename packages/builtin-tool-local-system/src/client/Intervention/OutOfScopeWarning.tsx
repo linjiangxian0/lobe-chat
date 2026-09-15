@@ -1,4 +1,6 @@
-import { Alert, Flexbox } from '@lobehub/ui';
+import { isPathWithinScope } from '@lobechat/tool-runtime';
+import { Flexbox } from '@lobehub/ui';
+import { Alert } from '@lobehub/ui/base-ui';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -6,8 +8,7 @@ import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
 import { useChatStore } from '@/store/chat';
 import { topicSelectors } from '@/store/chat/selectors';
-
-import { isPathWithinScope } from '../../utils/path';
+import { useElectronStore } from '@/store/electron';
 
 interface OutOfScopeWarningProps {
   /**
@@ -22,9 +23,11 @@ interface OutOfScopeWarningProps {
 const OutOfScopeWarning = memo<OutOfScopeWarningProps>(({ paths }) => {
   const { t } = useTranslation('tool');
 
-  // Get working directory from topic or agent store
   const topicWorkingDir = useChatStore(topicSelectors.currentTopicWorkingDirectory);
-  const agentWorkingDir = useAgentStore(agentSelectors.currentAgentWorkingDirectory);
+  const currentDeviceId = useElectronStore((s) => s.gatewayDeviceInfo?.deviceId);
+  const agentWorkingDir = useAgentStore(
+    agentSelectors.currentAgentWorkingDirectory(currentDeviceId),
+  );
   const workingDirectory = topicWorkingDir || agentWorkingDir;
 
   // Find paths that are outside the working directory

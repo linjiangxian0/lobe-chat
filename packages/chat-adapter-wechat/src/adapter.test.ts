@@ -1,8 +1,14 @@
+import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createWechatAdapter, WechatAdapter } from './adapter';
+import { createWechatAdapter, downloadMediaFromRawMessage, WechatAdapter } from './adapter';
+import { WechatApiClient, WechatUploadMediaType } from './api';
 import type { WechatRawMessage } from './types';
 import { MessageItemType, MessageState, MessageType } from './types';
+
+const { mockDecodeWechatVoice } = vi.hoisted(() => ({ mockDecodeWechatVoice: vi.fn() }));
+
+vi.mock('./voice', () => ({ decodeWechatVoice: mockDecodeWechatVoice }));
 
 // ---- helpers ----
 
@@ -232,7 +238,7 @@ describe('WechatAdapter', () => {
         ],
       });
       const message = adapter.parseMessage(raw);
-      expect(message.text).toBe('[image]');
+      expect(message.text).toBe('');
       // parseMessage is sync — CDN download only happens in parseRawEvent
       expect(message.attachments).toEqual([]);
     });
@@ -276,7 +282,7 @@ describe('WechatAdapter', () => {
         ],
       });
       const message = adapter.parseMessage(raw);
-      expect(message.text).toBe('[video]');
+      expect(message.text).toBe('');
     });
 
     it('should join multiple items with newline', () => {
@@ -290,9 +296,18 @@ describe('WechatAdapter', () => {
       expect(message.text).toBe('line1\nline2');
     });
 
-    it('should download image from CDN and convert to data URL', async () => {
-      const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-      vi.spyOn((adapter as any).api, 'downloadCdnMedia').mockResolvedValueOnce(imageBytes);
+    // -------------------- parseRawEvent (webhook path) --------------------
+    //
+    // The inbound parse path is metadata-only — it does NOT call the WeChat
+    // CDN. Eager downloading was removed because the chat-sdk's
+    // `Message.toJSON` strips `att.buffer` whenever the message is enqueued,
+    // making any pre-downloaded buffer pure waste. Server-side
+    // `WechatGatewayClient.extractFiles` is now the sole download path; it
+    // walks `message.raw.item_list` on demand via the standalone
+    // `downloadMediaFromRawMessage` helper (separately tested below).
+
+    it('should produce metadata-only image attachment without calling CDN', async () => {
+      const downloadSpy = vi.spyOn((adapter as any).api, 'downloadCdnMedia');
 
       const raw = makeRawMessage({
         item_list: [
@@ -311,25 +326,32 @@ describe('WechatAdapter', () => {
       const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
       const message = await factory?.();
 
-      const expectedDataUrl = `data:image/jpeg;base64,${imageBytes.toString('base64')}`;
+      expect(downloadSpy).not.toHaveBeenCalled();
       expect(message?.attachments).toEqual([
-        { mimeType: 'image/jpeg', name: 'image.jpg', type: 'image', url: expectedDataUrl },
+        {
+          mimeType: 'image/jpeg',
+          name: 'image.jpg',
+          type: 'image',
+          url: '',
+        },
       ]);
-      expect(message?.text).toBe('[image]');
+      expect(message?.text).toBe('');
+      // raw is preserved so server-side extractFiles can re-fetch from file_id.
+      expect(message?.raw).toBeDefined();
     });
 
-    it('should return empty attachments when CDN download fails', async () => {
-      vi.spyOn((adapter as any).api, 'downloadCdnMedia').mockRejectedValueOnce(
-        new Error('CDN download failed: 500'),
-      );
+    it('should produce metadata-only file attachment with inferred mimeType + size', async () => {
+      const downloadSpy = vi.spyOn((adapter as any).api, 'downloadCdnMedia');
 
       const raw = makeRawMessage({
         item_list: [
           {
-            image_item: {
+            file_item: {
+              file_name: 'report.pdf',
+              len: '4',
               media: { aes_key: 'ABEiM0RVZneImaq7zN3u/w==', encrypt_query_param: 'AAFFtest' },
             },
-            type: MessageItemType.IMAGE,
+            type: MessageItemType.FILE,
           },
         ],
       });
@@ -339,7 +361,114 @@ describe('WechatAdapter', () => {
       const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
       const message = await factory?.();
 
-      expect(message?.attachments).toEqual([]);
+      expect(downloadSpy).not.toHaveBeenCalled();
+      expect(message?.attachments).toEqual([
+        {
+          mimeType: 'application/pdf',
+          name: 'report.pdf',
+          size: 4,
+          type: 'file',
+          url: '',
+        },
+      ]);
+    });
+
+    it('should infer MIME type for xlsx files (metadata-only)', async () => {
+      const raw = makeRawMessage({
+        item_list: [
+          {
+            file_item: {
+              file_name: 'data.xlsx',
+              media: { aes_key: 'ABEiM0RVZneImaq7zN3u/w==', encrypt_query_param: 'AAFFtest' },
+            },
+            type: MessageItemType.FILE,
+          },
+        ],
+      });
+
+      await adapter.handleWebhook(makeRequest(raw));
+
+      const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
+      const message = await factory?.();
+
+      expect(message?.attachments?.[0]?.mimeType).toBe(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+    });
+
+    it('should fall back to application/octet-stream for unknown file extensions', async () => {
+      const raw = makeRawMessage({
+        item_list: [
+          {
+            file_item: {
+              file_name: 'data.xyz123',
+              media: { aes_key: 'ABEiM0RVZneImaq7zN3u/w==', encrypt_query_param: 'AAFFtest' },
+            },
+            type: MessageItemType.FILE,
+          },
+        ],
+      });
+
+      await adapter.handleWebhook(makeRequest(raw));
+
+      const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
+      const message = await factory?.();
+
+      expect(message?.attachments?.[0]?.mimeType).toBe('application/octet-stream');
+    });
+
+    it('should produce metadata-only video attachment with size', async () => {
+      const downloadSpy = vi.spyOn((adapter as any).api, 'downloadCdnMedia');
+
+      const raw = makeRawMessage({
+        item_list: [
+          {
+            type: MessageItemType.VIDEO,
+            video_item: {
+              media: { aes_key: 'k', encrypt_query_param: 'q' },
+              video_size: '12345',
+            },
+          },
+        ],
+      });
+
+      await adapter.handleWebhook(makeRequest(raw));
+
+      const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
+      const message = await factory?.();
+
+      expect(downloadSpy).not.toHaveBeenCalled();
+      expect(message?.attachments).toEqual([
+        { mimeType: 'video/mp4', size: 12_345, type: 'video', url: '' },
+      ]);
+    });
+
+    it('should produce metadata-only audio attachment for voice items', async () => {
+      const downloadSpy = vi.spyOn((adapter as any).api, 'downloadCdnMedia');
+
+      const raw = makeRawMessage({
+        item_list: [
+          {
+            type: MessageItemType.VOICE,
+            voice_item: {
+              media: { aes_key: 'k', encrypt_query_param: 'q' },
+              text: 'transcribed',
+            },
+          },
+        ],
+      });
+
+      await adapter.handleWebhook(makeRequest(raw));
+
+      const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
+      const message = await factory?.();
+
+      expect(downloadSpy).not.toHaveBeenCalled();
+      expect(message?.attachments).toEqual([
+        { mimeType: 'audio/wav', name: 'voice.wav', type: 'audio', url: '' },
+      ]);
+      // The transcription text should still flow into message.text via extractText
+      expect(message?.text).toBe('transcribed');
     });
   });
 
@@ -400,6 +529,198 @@ describe('WechatAdapter', () => {
       await expect(adapter.startTyping('t')).resolves.toBeUndefined();
     });
   });
+
+  // ---------- postMessage (outbound text + attachments) ----------
+
+  describe('postMessage', () => {
+    const threadId = 'wechat:single:user_x@im.wechat';
+    let sendMessageSpy: MockInstance<WechatApiClient['sendMessage']>;
+    let sendItemSpy: MockInstance<WechatApiClient['sendItem']>;
+    let uploadSpy: MockInstance<WechatApiClient['uploadCdnMedia']>;
+
+    beforeEach(() => {
+      adapter.setContextToken(threadId, 'ctx_tok');
+      sendMessageSpy = vi
+        .spyOn((adapter as any).api, 'sendMessage')
+        .mockResolvedValue({ ret: 0 }) as MockInstance<WechatApiClient['sendMessage']>;
+      sendItemSpy = vi
+        .spyOn((adapter as any).api, 'sendItem')
+        .mockResolvedValue({ ret: 0 }) as MockInstance<WechatApiClient['sendItem']>;
+      uploadSpy = vi.spyOn((adapter as any).api, 'uploadCdnMedia').mockResolvedValue({
+        aesKey: 'AES_B64',
+        cipherSize: 64,
+        encryptQueryParam: 'ENC_QP',
+        rawSize: 50,
+      }) as MockInstance<WechatApiClient['uploadCdnMedia']>;
+    });
+
+    it('sends pure text via sendMessage and never touches the media path', async () => {
+      const raw = await adapter.postMessage(threadId, 'hello world');
+
+      expect(sendMessageSpy).toHaveBeenCalledWith('user_x@im.wechat', 'hello world', 'ctx_tok');
+      expect(uploadSpy).not.toHaveBeenCalled();
+      expect(sendItemSpy).not.toHaveBeenCalled();
+      expect(raw.raw.item_list).toHaveLength(1);
+      expect(raw.raw.item_list[0].type).toBe(MessageItemType.TEXT);
+    });
+
+    it('reports each outbound text request before Chat SDK messages are sent', async () => {
+      const onBeforeSendMessage = vi.fn();
+      const trackedAdapter = new WechatAdapter({
+        botId: 'bot_123',
+        botToken: 'tok',
+        onBeforeSendMessage,
+      });
+      await trackedAdapter.initialize(mockChat as any);
+      trackedAdapter.setContextToken(threadId, 'ctx_tok');
+      const trackedSendMessage = vi
+        .spyOn((trackedAdapter as any).api, 'sendMessage')
+        .mockResolvedValue({ ret: 0 });
+
+      await trackedAdapter.postMessage(threadId, 'a'.repeat(4500));
+
+      expect(onBeforeSendMessage).toHaveBeenCalledWith({
+        count: 3,
+        toUserId: 'user_x@im.wechat',
+      });
+      expect(onBeforeSendMessage.mock.invocationCallOrder[0]).toBeLessThan(
+        trackedSendMessage.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('uploads and sends an image attachment as a separate IMAGE item', async () => {
+      const bytes = Buffer.from('pretend image bytes');
+
+      await adapter.postMessage(threadId, {
+        attachments: [
+          { data: bytes, mimeType: 'image/png', name: 'pic.png', type: 'image', url: '' },
+        ],
+        markdown: 'check this out',
+      });
+
+      // Text should be sent first via sendMessage, image as a separate sendItem.
+      expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+      expect(uploadSpy).toHaveBeenCalledWith(
+        'user_x@im.wechat',
+        WechatUploadMediaType.IMAGE,
+        bytes,
+      );
+      expect(sendItemSpy).toHaveBeenCalledTimes(1);
+
+      const [, item, contextToken] = sendItemSpy.mock.calls[0];
+      expect(contextToken).toBe('ctx_tok');
+      expect(item.type).toBe(MessageItemType.IMAGE);
+      expect(item.image_item?.media).toEqual({
+        aes_key: 'AES_B64',
+        encrypt_query_param: 'ENC_QP',
+        encrypt_type: 1,
+      });
+    });
+
+    it('routes a file attachment to a FILE item carrying file_name + len', async () => {
+      const bytes = Buffer.from('pdf bytes here');
+
+      await adapter.postMessage(threadId, {
+        attachments: [
+          { data: bytes, mimeType: 'application/pdf', name: 'report.pdf', type: 'file', url: '' },
+        ],
+        raw: '',
+      });
+
+      expect(uploadSpy).toHaveBeenCalledWith('user_x@im.wechat', WechatUploadMediaType.FILE, bytes);
+      expect(sendMessageSpy).not.toHaveBeenCalled(); // empty raw text → skip
+      const [, item] = sendItemSpy.mock.calls[0];
+      expect(item.type).toBe(MessageItemType.FILE);
+      expect(item.file_item?.file_name).toBe('report.pdf');
+      expect(item.file_item?.len).toBe(String(bytes.length));
+    });
+
+    it('falls back to attachment.url when data is absent', async () => {
+      const remoteBytes = Buffer.from([1, 2, 3, 4, 5]);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValueOnce(new Response(new Uint8Array(remoteBytes), { status: 200 })),
+      );
+
+      await adapter.postMessage(threadId, {
+        attachments: [
+          {
+            mimeType: 'image/jpeg',
+            name: 'photo.jpg',
+            type: 'image',
+            url: 'https://cdn.example/photo.jpg',
+          },
+        ],
+        raw: '',
+      });
+
+      expect(uploadSpy).toHaveBeenCalledTimes(1);
+      const uploadedBytes = uploadSpy.mock.calls[0][2];
+      expect(Buffer.from(uploadedBytes).equals(remoteBytes)).toBe(true);
+    });
+
+    it('normalizes a fetchData() result that resolves to an ArrayBuffer', async () => {
+      const bytes = Buffer.from([9, 8, 7, 6]);
+      const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
+      // chat 4.38.x types `fetchData` as `() => Promise<Buffer>`; 4.39 widens it to
+      // `Buffer | ArrayBuffer`. The adapter normalizes both at runtime, so keep
+      // exercising the ArrayBuffer path whichever version the range resolves to.
+      const fetchData = (async () => arrayBuffer) as unknown as () => Promise<Buffer>;
+
+      await adapter.postMessage(threadId, {
+        attachments: [
+          {
+            fetchData,
+            mimeType: 'image/png',
+            name: 'lazy.png',
+            type: 'image',
+            url: '',
+          },
+        ],
+        raw: '',
+      });
+
+      expect(uploadSpy).toHaveBeenCalledTimes(1);
+      const uploadedBytes = uploadSpy.mock.calls[0][2];
+      expect(Buffer.isBuffer(uploadedBytes)).toBe(true);
+      expect(Buffer.from(uploadedBytes).equals(bytes)).toBe(true);
+    });
+
+    it('promotes a FileUpload (no type field) to FILE based on mimeType', async () => {
+      const bytes = Buffer.from('arbitrary bytes');
+
+      await adapter.postMessage(threadId, {
+        files: [{ data: bytes, filename: 'notes.md', mimeType: 'text/markdown' }],
+        raw: '',
+      });
+
+      expect(uploadSpy).toHaveBeenCalledWith('user_x@im.wechat', WechatUploadMediaType.FILE, bytes);
+      const [, item] = sendItemSpy.mock.calls[0];
+      expect(item.type).toBe(MessageItemType.FILE);
+      expect(item.file_item?.file_name).toBe('notes.md');
+    });
+
+    it('keeps sending other attachments when one upload fails', async () => {
+      uploadSpy.mockRejectedValueOnce(new Error('CDN exploded')).mockResolvedValueOnce({
+        aesKey: 'AES_B64',
+        cipherSize: 16,
+        encryptQueryParam: 'ENC_OK',
+        rawSize: 4,
+      });
+
+      await adapter.postMessage(threadId, {
+        attachments: [
+          { data: Buffer.from('first'), name: 'a.png', type: 'image', url: '' },
+          { data: Buffer.from('ok'), name: 'b.png', type: 'image', url: '' },
+        ],
+        raw: '',
+      });
+
+      expect(uploadSpy).toHaveBeenCalledTimes(2);
+      expect(sendItemSpy).toHaveBeenCalledTimes(1); // second one succeeded
+    });
+  });
 });
 
 // ---------- createWechatAdapter factory ----------
@@ -409,5 +730,279 @@ describe('createWechatAdapter', () => {
     const adapter = createWechatAdapter({ botToken: 'tok' });
     expect(adapter).toBeInstanceOf(WechatAdapter);
     expect(adapter.name).toBe('wechat');
+  });
+});
+
+// ---------- downloadMediaFromRawMessage (the on-demand download path) ----------
+//
+// This is the helper called by server-side `WechatGatewayClient.extractFiles`
+// to materialize media after a chat-sdk Redis round-trip has stripped any
+// in-memory buffers. It walks `msg.item_list` and downloads each media item
+// via the `WechatApiClient.downloadCdnMedia` method, returning attachments
+// with `buffer` populated.
+
+describe('downloadMediaFromRawMessage', () => {
+  let api: WechatApiClient;
+  let downloadSpy: MockInstance<WechatApiClient['downloadCdnMedia']>;
+
+  beforeEach(() => {
+    api = new WechatApiClient('tok', 'bot_123');
+    downloadSpy = vi.spyOn(api, 'downloadCdnMedia') as MockInstance<
+      WechatApiClient['downloadCdnMedia']
+    >;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('downloads an image via CDN main media', async () => {
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    downloadSpy.mockResolvedValueOnce(imageBytes);
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            image_item: {
+              aeskey: '00112233445566778899aabbccddeeff',
+              media: { aes_key: 'k', encrypt_query_param: 'q' },
+            },
+            type: MessageItemType.IMAGE,
+          },
+        ],
+      }),
+    );
+
+    expect(downloadSpy).toHaveBeenCalledTimes(1);
+    expect(result).toEqual([
+      {
+        buffer: imageBytes,
+        mimeType: 'image/jpeg',
+        name: 'image.jpg',
+        type: 'image',
+        url: '',
+      },
+    ]);
+  });
+
+  it('falls back to CDN thumbnail when main media download fails', async () => {
+    const thumbBytes = Buffer.from([0x47, 0x49, 0x46, 0x38]);
+    downloadSpy
+      .mockRejectedValueOnce(new Error('main CDN failed'))
+      .mockResolvedValueOnce(thumbBytes);
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            image_item: {
+              aeskey: 'aeskey',
+              media: { aes_key: 'k', encrypt_query_param: 'main' },
+              thumb_media: { aes_key: 'k', encrypt_query_param: 'thumb' },
+            },
+            type: MessageItemType.IMAGE,
+          },
+        ],
+      }),
+    );
+
+    expect(downloadSpy).toHaveBeenCalledTimes(2);
+    expect((result?.[0] as any)?.buffer).toEqual(thumbBytes);
+  });
+
+  it('downloads a file with inferred mimeType + size', async () => {
+    const pdfBytes = Buffer.from([0x25, 0x50, 0x44, 0x46]);
+    downloadSpy.mockResolvedValueOnce(pdfBytes);
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            file_item: {
+              file_name: 'doc.pdf',
+              len: '4',
+              media: { aes_key: 'k', encrypt_query_param: 'q' },
+            },
+            type: MessageItemType.FILE,
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual([
+      {
+        buffer: pdfBytes,
+        mimeType: 'application/pdf',
+        name: 'doc.pdf',
+        size: 4,
+        type: 'file',
+        url: '',
+      },
+    ]);
+  });
+
+  it('downloads a video', async () => {
+    const videoBytes = Buffer.from([0x00, 0x00, 0x00, 0x18]);
+    downloadSpy.mockResolvedValueOnce(videoBytes);
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            type: MessageItemType.VIDEO,
+            video_item: {
+              media: { aes_key: 'k', encrypt_query_param: 'q' },
+              video_size: '24',
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual([
+      { buffer: videoBytes, mimeType: 'video/mp4', size: 24, type: 'video', url: '' },
+    ]);
+  });
+
+  it('downloads voice and decodes SILK into a playable WAV', async () => {
+    const silkBytes = Buffer.from([0x02, ...Buffer.from('#!SILK_V3'), 0x01]);
+    const wavBytes = Buffer.from('RIFF....WAVE');
+    downloadSpy.mockResolvedValueOnce(silkBytes);
+    mockDecodeWechatVoice.mockResolvedValueOnce({
+      buffer: wavBytes,
+      durationMs: 1200,
+      mimeType: 'audio/wav',
+      name: 'voice.wav',
+    });
+
+    const voiceItem = {
+      encode_type: 6,
+      media: { aes_key: 'k', encrypt_query_param: 'q' },
+      sample_rate: 24_000,
+    };
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({ item_list: [{ type: MessageItemType.VOICE, voice_item: voiceItem }] }),
+    );
+
+    expect(mockDecodeWechatVoice).toHaveBeenCalledWith(silkBytes, voiceItem, expect.any(Function));
+    expect(result).toEqual([
+      {
+        buffer: wavBytes,
+        mimeType: 'audio/wav',
+        name: 'voice.wav',
+        size: wavBytes.length,
+        type: 'audio',
+        url: '',
+      },
+    ]);
+  });
+
+  it('keeps raw bytes when voice decoding falls back', async () => {
+    const rawBytes = Buffer.from([0x46]);
+    downloadSpy.mockResolvedValueOnce(rawBytes);
+    mockDecodeWechatVoice.mockResolvedValueOnce({
+      buffer: rawBytes,
+      mimeType: 'audio/silk',
+      name: 'voice.silk',
+    });
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            type: MessageItemType.VOICE,
+            voice_item: { media: { aes_key: 'k', encrypt_query_param: 'q' } },
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual([
+      {
+        buffer: rawBytes,
+        mimeType: 'audio/silk',
+        name: 'voice.silk',
+        size: 1,
+        type: 'audio',
+        url: '',
+      },
+    ]);
+  });
+
+  it('returns empty array when CDN media is missing on every item', async () => {
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          { image_item: {}, type: MessageItemType.IMAGE },
+          { type: MessageItemType.VIDEO, video_item: {} },
+        ],
+      }),
+    );
+    expect(downloadSpy).not.toHaveBeenCalled();
+    expect(result).toEqual([]);
+  });
+
+  it('skips a single failing item without dropping the others', async () => {
+    const goodBytes = Buffer.from([0xff, 0xd8]);
+    downloadSpy.mockRejectedValueOnce(new Error('first failed')).mockResolvedValueOnce(goodBytes);
+
+    const result = await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            type: MessageItemType.VOICE,
+            voice_item: { media: { aes_key: 'k', encrypt_query_param: 'bad' } },
+          },
+          {
+            file_item: {
+              file_name: 'good.bin',
+              media: { aes_key: 'k', encrypt_query_param: 'good' },
+            },
+            type: MessageItemType.FILE,
+          },
+        ],
+      }),
+    );
+
+    expect(downloadSpy).toHaveBeenCalledTimes(2);
+    expect(result).toEqual([
+      {
+        buffer: goodBytes,
+        mimeType: 'application/octet-stream',
+        name: 'good.bin',
+        size: undefined,
+        type: 'file',
+        url: '',
+      },
+    ]);
+  });
+
+  it('forwards warnings to the optional logger', async () => {
+    downloadSpy.mockRejectedValue(new Error('boom'));
+    const warn = vi.fn();
+
+    await downloadMediaFromRawMessage(
+      api,
+      makeRawMessage({
+        item_list: [
+          {
+            image_item: { media: { aes_key: 'k', encrypt_query_param: 'q' } },
+            type: MessageItemType.IMAGE,
+          },
+        ],
+      }),
+      { warn },
+    );
+
+    expect(warn).toHaveBeenCalled();
   });
 });

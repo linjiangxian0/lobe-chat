@@ -1,8 +1,19 @@
 export interface WechatAdapterConfig {
+  /** Optional iLink API base URL returned by QR confirmation. */
+  baseUrl?: string;
   /** Bot's iLink user ID (from QR login) */
   botId?: string;
   /** Bot token obtained from iLink QR code authentication */
   botToken: string;
+  /** Called immediately before outbound `sendmessage` requests are attempted. */
+  onBeforeSendMessage?: (event: WechatOutboundSendEvent) => Promise<void> | void;
+}
+
+export interface WechatOutboundSendEvent {
+  /** Number of iLink `sendmessage` requests about to be made. */
+  count: number;
+  /** Recipient's iLink user ID. */
+  toUserId: string;
 }
 
 export interface WechatThreadId {
@@ -40,8 +51,8 @@ export interface BaseInfo {
 }
 
 export interface CDNMedia {
-  aes_key: string;
-  encrypt_query_param: string;
+  aes_key?: string;
+  encrypt_query_param?: string;
   encrypt_type?: 0 | 1;
 }
 
@@ -51,14 +62,21 @@ export interface TextItem {
 
 export interface ImageItem {
   aeskey?: string;
-  media: CDNMedia;
+  media?: CDNMedia;
+  thumb_media?: CDNMedia;
   url?: string;
 }
 
 export interface VoiceItem {
+  bits_per_sample?: number;
+  /** `1 = pcm`, `2 = adpcm`, `3 = feature`, `4 = speex`, `5 = amr`, `6 = silk`, `7 = mp3`, `8 = ogg-speex`. */
   encode_type?: number;
-  media: CDNMedia;
+  media?: CDNMedia;
+  /** Playback length in milliseconds. */
   playtime?: number;
+  /** Sample rate of the encoded audio; iLink voice defaults to 24000. */
+  sample_rate?: number;
+  /** Speech-to-text result provided by WeChat. */
   text?: string;
 }
 
@@ -66,11 +84,11 @@ export interface FileItem {
   file_name?: string;
   len?: string;
   md5?: string;
-  media: CDNMedia;
+  media?: CDNMedia;
 }
 
 export interface VideoItem {
-  media: CDNMedia;
+  media?: CDNMedia;
   play_length?: number;
   thumb_media?: CDNMedia;
   video_size?: string | number;

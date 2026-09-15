@@ -16,12 +16,17 @@ import { nanoid } from '@lobechat/utils';
 
 import { messageService } from '@/services/message';
 import { type ChatStore } from '@/store/chat/store';
+import type { MessageMapKeyInput } from '@/store/chat/utils/messageMapKey';
 import { type StoreSetter } from '@/store/types';
+
+import { dbMessageSelectors } from '../selectors';
 
 /**
  * Context for optimistic updates to specify session/topic isolation
  */
 export interface OptimisticUpdateContext {
+  /** Explicit message bucket for writes that cross operation scopes. */
+  context?: MessageMapKeyInput;
   operationId?: string;
   /** Pre-generated temp message ID (used when ID needs to be known before creation) */
   tempMessageId?: string;
@@ -53,17 +58,11 @@ export class MessageOptimisticUpdateActionImpl {
       tempMessageId?: string;
     },
   ): Promise<{ id: string; messages: UIChatMessage[] } | undefined> => {
-    const {
-      optimisticCreateTmpMessage,
-      internal_toggleMessageLoading,
-      internal_dispatchMessage,
-      replaceMessages,
-    } = this.#get();
+    const { optimisticCreateTmpMessage, internal_dispatchMessage, replaceMessages } = this.#get();
 
     let tempId = context?.tempMessageId;
     if (!tempId) {
       tempId = optimisticCreateTmpMessage(message as any, context);
-      internal_toggleMessageLoading(true, tempId);
     }
 
     try {
@@ -73,10 +72,8 @@ export class MessageOptimisticUpdateActionImpl {
       const ctx = this.#get().internal_getConversationContext(context);
       replaceMessages(result.messages, { context: ctx });
 
-      internal_toggleMessageLoading(false, tempId);
       return result;
     } catch (e) {
-      internal_toggleMessageLoading(false, tempId);
       internal_dispatchMessage(
         {
           id: tempId,
@@ -235,8 +232,21 @@ export class MessageOptimisticUpdateActionImpl {
     context?: OptimisticUpdateContext,
   ): Promise<void> => {
     const { internal_dispatchMessage, replaceMessages } = this.#get();
+    const toolMessage = dbMessageSelectors.getDbMessageById(id)(this.#get());
 
     internal_dispatchMessage({ id, type: 'updateMessagePlugin', value }, context);
+
+    if (toolMessage?.parentId && toolMessage.tool_call_id) {
+      internal_dispatchMessage(
+        {
+          id: toolMessage.parentId,
+          type: 'updateMessageTools',
+          tool_call_id: toolMessage.tool_call_id,
+          value: value as Partial<ChatToolPayload>,
+        },
+        context,
+      );
+    }
 
     const ctx = this.#get().internal_getConversationContext(context);
     const result = await messageService.updateMessagePlugin(id, value, ctx);

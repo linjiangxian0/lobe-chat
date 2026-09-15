@@ -1,5 +1,6 @@
-import { type LobeChatPluginManifest } from '@lobehub/chat-plugin-sdk';
-import { Block, Button, Flexbox, Icon, Text } from '@lobehub/ui';
+import { type ToolManifest } from '@lobechat/types';
+import { Block, Flexbox, Icon } from '@lobehub/ui';
+import { Button, Text } from '@lobehub/ui/base-ui';
 import { type FormInstance } from 'antd';
 import { Form as AForm } from 'antd';
 import { cssVar } from 'antd-style';
@@ -17,7 +18,7 @@ import PluginEmptyState from './EmptyState';
 
 const PluginPreview = memo<{ form: FormInstance }>(({ form }) => {
   const { t } = useTranslation('plugin');
-  const manifest: LobeChatPluginManifest = AForm.useWatch(['manifest'], form);
+  const manifest: ToolManifest = AForm.useWatch(['manifest'], form);
   const meta = manifest?.meta;
 
   if (!manifest)
